@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Piano Timer – Auto & Manual</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --text:#e6e6e6; --muted:#a0a6b0; --accent:#4aa3ff; --green:#6cffb7; --danger:#ff6b6b; }
+  html,body{margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+  .wrap{max-width:760px;margin:22px auto;padding:0 16px 40px}
+  h1{font-size:22px;margin:0 0 12px}
+  .card{background:var(--card);border:1px solid #222632;border-radius:14px;padding:14px 14px;box-shadow:0 6px 24px rgba(0,0,0,.32)}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .btn{padding:10px 14px;border-radius:12px;border:1px solid transparent;font-weight:800;cursor:pointer}
+  .primary{background:var(--accent);color:#00111f}
+  .secondary{background:#273145;color:var(--text);border-color:#38445c}
+  .success{background:var(--green);color:#002b1b}
+  .danger{background:var(--danger);color:#2b0000}
+  .pill{padding:6px 10px;border-radius:999px;border:1px solid #2a3346;font-size:12px}
+  .idle{background:rgba(255,107,107,.15);color:var(--danger)}
+  .run{background:rgba(108,255,183,.15);color:var(--green)}
+  .pause{background:rgba(74,163,255,.15);color:var(--accent)}
+  .grid{display:grid;gap:10px}
+  .two{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .stat{background:#10141b;border:1px solid #1f2531;border-radius:12px;padding:12px}
+  .label{color:var(--muted);font-size:12px}
+  .value{font-variant-numeric:tabular-nums;font-weight:900;font-size:22px}
+  canvas{width:100%;height:90px;background:#0b0e13;border:1px solid #1a2130;border-radius:10px}
+  .slider{width:100%}
+  .small{color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🎹 Piano Timer – Auto & Manual</h1>
+  <div class="card grid">
+    <div class="row">
+      <button id="btnEnable" class="btn primary">Enable Mic</button>
+      <button id="btnDisable" class="btn secondary" disabled>Disable Mic</button>
+      <button id="btnAuto" class="btn success" disabled>Auto: ON</button>
+      <button id="btnManualStart" class="btn secondary" disabled>▶ Manual Start</button>
+      <button id="btnManualStop" class="btn secondary" disabled>⏸ Manual Stop</button>
+      <span id="badge" class="pill idle">IDLE</span>
+    </div>
+
+    <div class="grid two">
+      <div class="stat"><div class="label">Elapsed (current run)</div><div id="elapsed" class="value">00:00:00</div></div>
+      <div class="stat"><div class="label">Total (since open)</div><div id="total" class="value">00:00:00</div></div>
+    </div>
+
+    <div class="grid two">
+      <div class="stat"><div class="label">Frame level (dB)</div><div id="frameDb" class="value">–∞</div></div>
+      <div class="stat"><div class="label">Noise floor (dB)</div><div id="noiseDb" class="value">–60.0</div></div>
+    </div>
+
+    <div>
+      <canvas id="meter"></canvas>
+      <div class="row">
+        <button id="btnRecal" class="btn secondary" disabled>Recalibrate Noise</button>
+        <button id="btnReset" class="btn danger" disabled>Reset Counters</button>
+        <button id="btnExport" class="btn secondary" disabled>Export CSV</button>
+      </div>
+      <div class="small">The meter shows level after filtering (HP 120 Hz → LP 4 kHz). Auto starts on activity and pauses after sustained silence.</div>
+    </div>
+
+    <details>
+      <summary>Advanced detection settings</summary>
+      <div class="grid">
+        <label>Start SNR threshold (dB): <span id="snrStartLbl">8</span>
+          <input id="snrStart" class="slider" type="range" min="3" max="20" step="1" value="8">
+        </label>
+        <label>Stop SNR threshold (dB): <span id="snrStopLbl">6</span>
+          <input id="snrStop" class="slider" type="range" min="0" max="18" step="1" value="6">
+        </label>
+        <label>Silence to pause (seconds): <span id="silenceLbl">10</span>
+          <input id="silence" class="slider" type="range" min="3" max="30" step="1" value="10">
+        </label>
+        <label>Noise adapt rate (inactive/active): <span id="adaptLbl">0.02 / 0.004</span>
+          <input id="adaptInact" class="slider" type="range" min="0.005" max="0.08" step="0.005" value="0.02">
+          <input id="adaptAct" class="slider" type="range" min="0.001" max="0.02" step="0.001" value="0.004">
+        </label>
+      </div>
+      <div class="small">Tip: If it never pauses, raise Start/Stop SNR or tap “Recalibrate Noise.” If it misses quiet notes, lower thresholds slightly.</div>
+    </details>
+  </div>
+  <p class="small">Keep Safari in the foreground. Add to Home Screen for an app-like experience.</p>
+</div>
+
+<script>
+(() => {
+  const ui = {
+    btnEnable: document.getElementById('btnEnable'),
+    btnDisable: document.getElementById('btnDisable'),
+    btnAuto: document.getElementById('btnAuto'),
+    btnManualStart: document.getElementById('btnManualStart'),
+    btnManualStop: document.getElementById('btnManualStop'),
+    btnRecal: document.getElementById('btnRecal'),
+    btnReset: document.getElementById('btnReset'),
+    btnExport: document.getElementById('btnExport'),
+    badge: document.getElementById('badge'),
+    elapsed: document.getElementById('elapsed'),
+    total: document.getElementById('total'),
+    frameDb: document.getElementById('frameDb'),
+    noiseDb: document.getElementById('noiseDb'),
+    snrStart: document.getElementById('snrStart'),
+    snrStartLbl: document.getElementById('snrStartLbl'),
+    snrStop: document.getElementById('snrStop'),
+    snrStopLbl: document.getElementById('snrStopLbl'),
+    silence: document.getElementById('silence'),
+    silenceLbl: document.getElementById('silenceLbl'),
+    adaptInact: document.getElementById('adaptInact'),
+    adaptAct: document.getElementById('adaptAct'),
+    adaptLbl: document.getElementById('adaptLbl'),
+    meter: document.getElementById('meter')
+  };
+
+  // Parameters with hysteresis
+  let SNR_START = parseFloat(ui.snrStart.value); // start if >=
+  let SNR_STOP  = parseFloat(ui.snrStop.value);  // consider inactive if <
+  let SILENCE_S = parseFloat(ui.silence.value);
+  let ADAPT_INACT = parseFloat(ui.adaptInact.value);
+  let ADAPT_ACT   = parseFloat(ui.adaptAct.value);
+
+  // State
+  let audio=null, analyser=null, hp=null, lp=null, micStream=null, buf=null, raf=0;
+  const state = {
+    auto:true,
+    running:false,
+    startTs:0,
+    lastActiveTs:0,
+    accumulated:0,
+    sessionAccum:0,
+    noiseFloorDb:-60,
+    log:[["timestamp","event","frame_db","noise_db","total_seconds"]]
+  };
+
+  // Helpers
+  const fmt = s => { s=Math.floor(s); const h=String(Math.floor(s/3600)).padStart(2,'0'); const m=String(Math.floor((s%3600)/60)).padStart(2,'0'); const ss=String(s%60).padStart(2,'0'); return `${h}:${m}:${ss}`; };
+  const setBadge = kind => { ui.badge.className = 'pill ' + kind; ui.badge.textContent = kind==='run'?'RUNNING':kind==='pause'?'PAUSED':'IDLE'; };
+  const log = (ev, frameDb) => { const total = Math.floor(totalSeconds()); state.log.push([new Date().toISOString(), ev, frameDb.toFixed(1), state.noiseFloorDb.toFixed(1), String(total)]); };
+  const totalSeconds = () => state.running ? state.accumulated + ((state.lastActiveTs||Date.now()) - state.startTs)/1000 : state.accumulated;
+
+  const rmsDb = arr => { let sum=0; for (let i=0;i<arr.length;i++) { const v=arr[i]; sum += v*v; } const rms = Math.sqrt(sum/arr.length + 1e-12); return 20*Math.log10(rms + 1e-12); };
+  const drawMeter = snr => {
+    const ctx = ui.meter.getContext('2d');
+    const w = ui.meter.width = ui.meter.clientWidth * devicePixelRatio;
+    const h = ui.meter.height = ui.meter.clientHeight * devicePixelRatio;
+    ctx.clearRect(0,0,w,h);
+    const barW = w-20, barH = h-20;
+    ctx.fillStyle = '#121822'; ctx.fillRect(10,10,barW,barH);
+    const val = Math.max(0, Math.min(1, (snr + 20)/40));
+    ctx.fillStyle = '#4aa3ff'; ctx.fillRect(10,10, val*barW, barH);
+    ctx.strokeStyle = '#283246'; ctx.strokeRect(10,10,barW,barH);
+  };
+
+  // Timer transitions
+  const startTimer = now => {
+    if (!state.running) {
+      state.running = true;
+      state.startTs = now;
+      state.lastActiveTs = now;
+      state.sessionAccum = 0;
+      setBadge('run'); log("START", Number(ui.frameDb.textContent.replace('–','-')||-60));
+    }
+  };
+  const pauseTimer = (now, frameDb) => {
+    if (state.running) {
+      state.accumulated += (state.lastActiveTs - state.startTs)/1000;
+      state.running = false; state.sessionAccum = 0;
+      setBadge('pause'); log("PAUSE", frameDb);
+    }
+  };
+
+  // UI
+  const tickUI = () => {
+    ui.elapsed.textContent = state.running ? fmt((state.lastActiveTs - state.startTs)/1000) : '00:00:00';
+    ui.total.textContent   = fmt(totalSeconds());
+  };
+  setInterval(tickUI, 500);
+
+  // Audio processing
+  const enableMic = async () => {
+    audio = new (window.AudioContext || window.webkitAudioContext)({latencyHint:'interactive'});
+    await audio.resume();
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false }});
+    const src = audio.createMediaStreamSource(micStream);
+    hp = audio.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=120;
+    lp = audio.createBiquadFilter(); lp.type='lowpass';  lp.frequency.value=4000;
+    analyser = audio.createAnalyser(); analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.2;
+    src.connect(hp).connect(lp).connect(analyser);
+    buf = new Float32Array(analyser.fftSize);
+    ui.btnEnable.disabled = true; ui.btnDisable.disabled = false;
+    ui.btnAuto.disabled = false; ui.btnManualStart.disabled = false; ui.btnManualStop.disabled = false; ui.btnRecal.disabled = false; ui.btnReset.disabled = false; ui.btnExport.disabled = false;
+    setBadge('pause');
+    raf = requestAnimationFrame(loop);
+  };
+
+  const disableMic = () => {
+    cancelAnimationFrame(raf);
+    if (micStream) micStream.getTracks().forEach(t=>t.stop());
+    if (audio && audio.state!=='closed') audio.close();
+    audio=analyser=hp=lp=micStream=null;
+    ui.btnEnable.disabled=false; ui.btnDisable.disabled=true;
+    setBadge('idle');
+  };
+
+  let lastLoop = performance.now();
+  const FRAME_MS = 100;
+  const loop = () => {
+    raf = requestAnimationFrame(loop);
+    const now = performance.now();
+    if (!analyser || now-lastLoop < FRAME_MS) return;
+    lastLoop = now;
+
+    analyser.getFloatTimeDomainData(buf);
+    const frameDb = rmsDb(buf);
+    const snrDb = frameDb - state.noiseFloorDb;
+    const active = snrDb >= (state.running ? SNR_STOP : SNR_START);
+
+    // UI
+    ui.frameDb.textContent = Number.isFinite(frameDb) ? frameDb.toFixed(1) : '–∞';
+    ui.noiseDb.textContent = state.noiseFloorDb.toFixed(1);
+    drawMeter(snrDb);
+
+    const nowEpoch = Date.now();
+
+    // Noise adaptation: always adapt a bit; slower when active to follow environment drift
+    const rate = active ? ADAPT_ACT : ADAPT_INACT;
+    state.noiseFloorDb = (1-rate)*state.noiseFloorDb + rate*frameDb;
+
+    if (state.auto) {
+      if (active) {
+        if (!state.running) startTimer(nowEpoch);
+        state.lastActiveTs = nowEpoch;
+        state.sessionAccum = (state.lastActiveTs - state.startTs)/1000;
+      } else if (state.running) {
+        const idleFor = (nowEpoch - state.lastActiveTs)/1000;
+        if (idleFor >= SILENCE_S) pauseTimer(nowEpoch, frameDb);
+      }
+    }
+  };
+
+  // Export
+  const exportCsv = () => {
+    const rows = state.log.map(r => r.map(v => /[",\n]/.test(v) ? `"${String(v).replaceAll('"','""')}"` : v).join(','));
+    const blob = new Blob([rows.join('\n')], {type:'text/csv'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href=url; a.download='piano_timer_log.csv'; document.body.appendChild(a); a.click();
+    setTimeout(()=>{URL.revokeObjectURL(url); a.remove();}, 0);
+  };
+
+  // Handlers
+  ui.btnEnable.addEventListener('click', enableMic);
+  ui.btnDisable.addEventListener('click', disableMic);
+  ui.btnAuto.addEventListener('click', () => {
+    state.auto = !state.auto;
+    ui.btnAuto.textContent = 'Auto: ' + (state.auto ? 'ON' : 'OFF');
+    ui.btnAuto.className = 'btn ' + (state.auto ? 'success' : 'secondary');
+  });
+  ui.btnManualStart.addEventListener('click', () => { state.auto=false; ui.btnAuto.textContent='Auto: OFF'; ui.btnAuto.className='btn secondary'; startTimer(Date.now()); });
+  ui.btnManualStop.addEventListener('click', () => { state.auto=false; ui.btnAuto.textContent='Auto: OFF'; ui.btnAuto.className='btn secondary'; pauseTimer(Date.now(), Number(ui.frameDb.textContent.replace('–','-')||-60)); });
+  ui.btnRecal.addEventListener('click', () => {
+    if (!analyser) return;
+    analyser.getFloatTimeDomainData(buf);
+    const frameDb = rmsDb(buf);
+    state.noiseFloorDb = frameDb; // snap to current level
+    ui.noiseDb.textContent = state.noiseFloorDb.toFixed(1);
+  });
+  ui.btnReset.addEventListener('click', () => { state.running=false; state.accumulated=0; state.sessionAccum=0; setBadge('pause'); });
+  ui.btnExport.addEventListener('click', exportCsv);
+
+  // Sliders
+  const sync = () => {
+    SNR_START = parseFloat(ui.snrStart.value); ui.snrStartLbl.textContent = SNR_START;
+    SNR_STOP  = parseFloat(ui.snrStop.value);  ui.snrStopLbl.textContent = SNR_STOP;
+    SILENCE_S = parseFloat(ui.silence.value);  ui.silenceLbl.textContent = SILENCE_S;
+    ADAPT_INACT = parseFloat(ui.adaptInact.value);
+    ADAPT_ACT   = parseFloat(ui.adaptAct.value);
+    ui.adaptLbl.textContent = ADAPT_INACT.toFixed(3) + ' / ' + ADAPT_ACT.toFixed(3);
+  };
+  ['snrStart','snrStop','silence','adaptInact','adaptAct'].forEach(id => ui[id].addEventListener('input', sync));
+  sync();
+
+  // Pause if backgrounded
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && state.running) pauseTimer(Date.now(), Number(ui.frameDb.textContent.replace('–','-')||-60));
+  });
+})();</script>
+</body>
+</html>

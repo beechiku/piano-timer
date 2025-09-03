@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Piano Auto Timer</title>
+<style>
+  body { font-family: sans-serif; background:#0f1115; color:#eee; margin:0; padding:1em; }
+  button { padding:10px 14px; margin:6px; border-radius:8px; border:none; font-size:15px; font-weight:bold; cursor:pointer; }
+  #startBtn { background:#4aa3ff; color:#00111f; }
+  #stopBtn { background:#ff6b6b; color:#2b0000; }
+  #manualStart { background:#6cffb7; color:#002b1b; }
+  #manualStop { background:#fbc02d; color:#332000; }
+  .stat { font-size:22px; margin-top:10px; }
+</style>
+</head>
+<body>
+<h1>🎹 Piano Auto Timer</h1>
+<p>Timer auto starts/stops on piano sounds (≥10s silence pauses). You can also control it manually:</p>
+<button id="enableMic">Enable Mic</button>
+<button id="disableMic" disabled>Disable Mic</button><br>
+<button id="manualStart" disabled>▶ Manual Start</button>
+<button id="manualStop" disabled>⏸ Manual Stop</button>
+<div class="stat">Status: <span id="status">IDLE</span></div>
+<div class="stat">Elapsed: <span id="elapsed">00:00:00</span></div>
+<div class="stat">Total: <span id="total">00:00:00</span></div>
+
+<script>
+let audio, analyser, micStream, buf;
+let running=false, startTs=0, lastActiveTs=0, accumulated=0;
+let noiseFloor=-60, consecActive=0;
+let auto=true; // auto detection active
+const fmt=t=>{t=Math.floor(t);let h=String(Math.floor(t/3600)).padStart(2,'0');let m=String(Math.floor((t%3600)/60)).padStart(2,'0');let s=String(t%60).padStart(2,'0');return `${h}:${m}:${s}`};
+
+function updateUI(){
+  document.getElementById("status").textContent=running?"RUNNING":"PAUSED";
+  document.getElementById("elapsed").textContent=running?fmt((Date.now()-startTs)/1000):"00:00:00";
+  document.getElementById("total").textContent=fmt(running?accumulated+((Date.now()-startTs)/1000):accumulated);
+}
+setInterval(updateUI,500);
+
+function startTimer(now){ if(!running){ running=true; startTs=now; lastActiveTs=now; } }
+function pauseTimer(now){ if(running){ accumulated+=(lastActiveTs-startTs)/1000; running=false; } }
+
+async function enableMic(){
+  audio=new (window.AudioContext||window.webkitAudioContext)();
+  await audio.resume();
+  micStream=await navigator.mediaDevices.getUserMedia({audio:true});
+  const src=audio.createMediaStreamSource(micStream);
+  analyser=audio.createAnalyser(); analyser.fftSize=2048;
+  src.connect(analyser); buf=new Float32Array(analyser.fftSize);
+  requestAnimationFrame(tick);
+  document.getElementById("enableMic").disabled=true;
+  document.getElementById("disableMic").disabled=false;
+  document.getElementById("manualStart").disabled=false;
+  document.getElementById("manualStop").disabled=false;
+}
+function disableMic(){
+  if(micStream) micStream.getTracks().forEach(t=>t.stop());
+  if(audio) audio.close();
+  running=false; audio=null;
+  document.getElementById("enableMic").disabled=false;
+  document.getElementById("disableMic").disabled=true;
+}
+
+function rmsDb(arr){let sum=0;for(let i=0;i<arr.length;i++){sum+=arr[i]*arr[i];}let rms=Math.sqrt(sum/arr.length+1e-12);return 20*Math.log10(rms+1e-12);}
+function tick(){ if(!analyser) return;
+  analyser.getFloatTimeDomainData(buf);
+  const frameDb=rmsDb(buf);
+  const snr=frameDb-noiseFloor;
+  const active=snr>=6;
+  const now=Date.now();
+  if(auto){ if(active){consecActive++; if(consecActive>=2) startTimer(now); if(running) lastActiveTs=now;} else {noiseFloor=0.99*noiseFloor+0.01*frameDb; if(running && (now-lastActiveTs)/1000>=10) pauseTimer(now); consecActive=0;} }
+  requestAnimationFrame(tick);
+}
+
+// Manual control
+document.getElementById("manualStart").onclick=()=>{auto=false;startTimer(Date.now());};
+document.getElementById("manualStop").onclick=()=>{auto=false;pauseTimer(Date.now());};
+document.getElementById("enableMic").onclick=enableMic;
+document.getElementById("disableMic").onclick=disableMic;
+</script>
+</body>
+</html>

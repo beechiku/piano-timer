@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Piano Timer – Plan A (Clean UI)</title>
+<style>
+  :root { --bg:#0f1115; --card:#151922; --text:#e6e6e6; --muted:#a0a6b0; --accent:#4aa3ff; --green:#6cffb7; --danger:#ff6b6b; }
+  html,body{margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+  .wrap{max-width:760px;margin:24px auto;padding:0 16px 56px}
+  h1{font-size:22px;margin:8px 0 12px}
+  .card{background:var(--card);border:1px solid #222632;border-radius:16px;padding:16px;box-shadow:0 8px 32px rgba(0,0,0,.32)}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .btn{padding:12px 14px;border-radius:12px;border:1px solid transparent;font-weight:800;cursor:pointer}
+  .primary{background:var(--accent);color:#00111f}
+  .secondary{background:#273145;color:var(--text);border-color:#38445c}
+  .success{background:var(--green);color:#002b1b}
+  .pill{padding:6px 10px;border-radius:999px;border:1px solid #2a3346;font-size:12px}
+  .idle{background:rgba(255,107,107,.15);color:var(--danger)}
+  .run{background:rgba(108,255,183,.15);color:var(--green)}
+  .pause{background:rgba(74,163,255,.15);color:var(--accent)}
+  .center{display:flex;align-items:center;justify-content:center;text-align:center}
+  .totalTimer{font-variant-numeric:tabular-nums;font-weight:900;font-size:64px;line-height:1;margin:6px 0 10px;color:var(--green)}
+  .label{color:var(--muted);font-size:12px}
+  .value{font-variant-numeric:tabular-nums;font-weight:900;font-size:22px}
+  .stat{background:#10141b;border:1px solid #1f2531;border-radius:12px;padding:12px}
+  .grid{display:grid;gap:10px}
+  .two{grid-template-columns:repeat(2,minmax(0,1fr))}
+  canvas{width:100%;height:90px;background:#0b0e13;border:1px solid #1a2130;border-radius:10px}
+  .slider{width:100%}
+  .small{color:var(--muted);font-size:12px}
+  .diag{color:var(--muted);font-size:12px;margin-top:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🎹 Piano Timer</h1>
+  <div class="card grid">
+    <div class="row">
+      <button id="btnEnable" class="btn primary">Enable Mic</button>
+      <button id="btnDisable" class="btn secondary" disabled>Disable Mic</button>
+      <button id="btnAuto" class="btn success">Auto: ON</button>
+      <button id="btnManualStart" class="btn secondary">▶ Manual Start</button>
+      <button id="btnManualPause" class="btn secondary">⏸ Manual Pause</button>
+      <span id="badge" class="pill idle">IDLE</span>
+    </div>
+
+    <!-- Big centered TOTAL timer -->
+    <div class="center">
+      <div>
+        <div class="label">Total (since open)</div>
+        <div id="total" class="totalTimer">00:00:00</div>
+      </div>
+    </div>
+
+    <!-- Diagnostics -->
+    <div class="grid two">
+      <div class="stat"><div class="label">Frame level (wide band dB)</div><div id="frameDb" class="value">–∞</div></div>
+      <div class="stat"><div class="label">Noise floor (wide dB)</div><div id="noiseDb" class="value">–60.0</div></div>
+    </div>
+
+    <div class="grid two">
+      <div class="stat"><div class="label">Piano band (C3–C5) dB</div><div id="pianoDb" class="value">–∞</div></div>
+      <div class="stat"><div class="label">Piano noise floor (dB)</div><div id="pianoNoiseDb" class="value">–60.0</div></div>
+    </div>
+
+    <div class="grid two">
+      <div class="stat"><div class="label">Piano SNR (dB)</div><div id="pianoSnr" class="value">0.0</div></div>
+      <div class="stat"><div class="label">Detector status</div><div id="detStatus" class="value">idle</div></div>
+    </div>
+
+    <div>
+      <canvas id="meter"></canvas>
+      <div class="small">Midband detector + tonality + pitch grid (Plan A). Meter shows SNR (0–20 dB).</div>
+      <div class="diag" id="pitchDiag">f0: — Hz (—), cents: —, peak: —</div>
+    </div>
+
+    <details>
+      <summary>Advanced detection settings</summary>
+      <div class="grid">
+        <label>Start SNR threshold (dB): <span id="snrStartLbl">10</span>
+          <input id="snrStart" class="slider" type="range" min="3" max="20" step="1" value="10">
+        </label>
+        <label>Stop SNR threshold (dB): <span id="snrStopLbl">8</span>
+          <input id="snrStop" class="slider" type="range" min="0" max="18" step="1" value="8">
+        </label>
+        <label>Silence to pause (seconds): <span id="silenceLbl">10</span>
+          <input id="silence" class="slider" type="range" min="3" max="30" step="1" value="10">
+        </label>
+      </div>
+    </details>
+  </div>
+</div>
+
+<script>
+(() => {
+  const ui = {
+    btnEnable: document.getElementById('btnEnable'),
+    btnDisable: document.getElementById('btnDisable'),
+    btnAuto: document.getElementById('btnAuto'),
+    btnManualStart: document.getElementById('btnManualStart'),
+    btnManualPause: document.getElementById('btnManualPause'),
+    badge: document.getElementById('badge'),
+    total: document.getElementById('total'),
+    frameDb: document.getElementById('frameDb'),
+    noiseDb: document.getElementById('noiseDb'),
+    pianoDb: document.getElementById('pianoDb'),
+    pianoNoiseDb: document.getElementById('pianoNoiseDb'),
+    pianoSnr: document.getElementById('pianoSnr'),
+    detStatus: document.getElementById('detStatus'),
+    snrStart: document.getElementById('snrStart'),
+    snrStartLbl: document.getElementById('snrStartLbl'),
+    snrStop: document.getElementById('snrStop'),
+    snrStopLbl: document.getElementById('snrStopLbl'),
+    silence: document.getElementById('silence'),
+    silenceLbl: document.getElementById('silenceLbl'),
+    meter: document.getElementById('meter'),
+    pitchDiag: document.getElementById('pitchDiag')
+  };
+
+  // Parameters
+  let SNR_START = parseFloat(ui.snrStart.value);
+  let SNR_STOP  = parseFloat(ui.snrStop.value);
+  let SILENCE_S = parseFloat(ui.silence.value);
+  const SFM_MAX = 0.5; // tonal check threshold
+  const CentsStart = 35, CentsKeep = 45;
+  const PeakStart = 0.40, PeakKeep = 0.30;
+  const NeedStableFrames = 2;
+
+  // State
+  let raf=0;
+  const state = {
+    auto:true,
+    running:false,
+    startTs:0,
+    accumulated:0,
+    lastHeardTs:0,
+    noiseWideDb:-62,
+    noiseDetDb:-62,
+    consecActive:0,
+    lastMidi:null,
+    stableCount:0
+  };
+
+  // Audio nodes (scoped outside to allow disable)
+  let audio=null, micStream=null, analyserWide=null, analyserDet=null;
+  let bufTimeWide=null, bufTimeDet=null, bufFreqDet=null;
+
+  // Helpers
+  const fmt = s => { s=Math.floor(s); const h=String(Math.floor(s/3600)).padStart(2,'0'); const m=String(Math.floor((s%3600)/60)).padStart(2,'0'); const ss=String(s%60).padStart(2,'0'); return `${h}:${m}:${ss}`; };
+  const setBadge = kind => { ui.badge.className = 'pill ' + kind; ui.badge.textContent = kind==='run'?'RUNNING':kind==='pause'?'PAUSED':'IDLE'; };
+  const totalSeconds = () => state.running ? state.accumulated + ((Date.now() - state.startTs)/1000) : state.accumulated;
+  const rmsDb = arr => { let sum=0; for (let i=0;i<arr.length;i++){ const v=arr[i]; sum += v*v; } const rms = Math.sqrt(sum/arr.length + 1e-12); return 20*Math.log10(rms + 1e-12); };
+  const spectralFlatness = (freqDb) => {
+    let geo=0, arith=0, n=freqDb.length;
+    for (let i=0;i<n;i++){ const mag=Math.pow(10, freqDb[i]/20); const x=Math.max(1e-12,mag); geo+=Math.log(x); arith+=x; }
+    const gm = Math.exp(geo/n), am = arith/n;
+    return gm/(am+1e-12);
+  };
+  const hzToMidi = hz => 69 + 12*Math.log2(hz/440);
+  const noteName = midi => {
+    const names=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+    const r = Math.round(midi);
+    const i = r % 12; const oct = Math.floor(r/12 - 1);
+    return `${names[i]}${oct}`;
+  };
+
+  // Autocorrelation f0 in 130–523 Hz
+  const estimateF0 = (x, sr) => {
+    const n = x.length;
+    let mean=0; for (let i=0;i<n;i++) mean+=x[i]; mean/=n;
+    let energy0=0;
+    const w = Math.PI*2/(n-1);
+    const y = new Float32Array(n);
+    for (let i=0;i<n;i++){ const v = (x[i]-mean) * (0.5 - 0.5*Math.cos(w*i)); y[i]=v; energy0 += v*v; }
+    if (energy0 < 1e-8) return {f0:0, peak:0};
+    const minLag = Math.floor(sr/523.25);
+    const maxLag = Math.ceil(sr/130.81);
+    let bestLag=minLag, best=0;
+    for (let lag=minLag; lag<=maxLag; lag++){
+      let sum=0, e=0;
+      for (let i=0;i<n-lag;i++){ const a=y[i], b=y[i+lag]; sum += a*b; e += a*a; }
+      const r = sum / Math.max(1e-8, e);
+      if (r > best){ best=r; bestLag=lag; }
+    }
+    return {f0: sr/bestLag, peak: best};
+  };
+
+  const drawMeter = snr => {
+    const ctx = ui.meter.getContext('2d');
+    const w = ui.meter.width = ui.meter.clientWidth * devicePixelRatio;
+    const h = ui.meter.height = ui.meter.clientHeight * devicePixelRatio;
+    ctx.clearRect(0,0,w,h);
+    const barW=w-20, barH=h-20;
+    ctx.fillStyle='#121822'; ctx.fillRect(10,10,barW,barH);
+    const val=Math.max(0,Math.min(1,snr/20));
+    ctx.fillStyle='#4aa3ff'; ctx.fillRect(10,10,val*barW,barH);
+    ctx.strokeStyle='#283246'; ctx.strokeRect(10,10,barW,barH);
+  };
+
+  // Timer controls
+  const startTimer = now => { if (!state.running) { state.running=true; state.startTs=now; setBadge('run'); } };
+  const pauseTimer = now => { if (state.running) { state.accumulated += (now - state.startTs)/1000; state.running=false; setBadge('pause'); } };
+
+  // UI refresh
+  setInterval(() => { ui.total.textContent = fmt(totalSeconds()); }, 250);
+
+  // Audio processing
+  const enableMic = async () => {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    audio = new AudioCtx({latencyHint:'interactive'});
+    await audio.resume();
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false }});
+    const src = audio.createMediaStreamSource(micStream);
+
+    // Wide band for UI
+    const hpWide = audio.createBiquadFilter(); hpWide.type='highpass'; hpWide.frequency.value=120;
+    const lpWide = audio.createBiquadFilter(); lpWide.type='lowpass';  lpWide.frequency.value=4000;
+    analyserWide = audio.createAnalyser(); analyserWide.fftSize=2048; analyserWide.smoothingTimeConstant=0.2;
+    src.connect(hpWide).connect(lpWide).connect(analyserWide);
+
+    // Detection band
+    const hpDet = audio.createBiquadFilter(); hpDet.type='highpass'; hpDet.frequency.value=130;
+    const lpDet = audio.createBiquadFilter(); lpDet.type='lowpass';  lpDet.frequency.value=1000;
+    analyserDet = audio.createAnalyser(); analyserDet.fftSize=2048; analyserDet.smoothingTimeConstant=0.15;
+    src.connect(hpDet).connect(lpDet).connect(analyserDet);
+
+    bufTimeWide = new Float32Array(analyserWide.fftSize);
+    bufTimeDet  = new Float32Array(analyserDet.fftSize);
+    bufFreqDet  = new Float32Array(analyserDet.frequencyBinCount);
+
+    ui.btnEnable.disabled = true; ui.btnDisable.disabled = false;
+
+    let lastLoop = performance.now();
+    const FRAME_MS = 100;
+    const loop = () => {
+      raf = requestAnimationFrame(loop);
+      const now = performance.now();
+      if (now - lastLoop < FRAME_MS) return;
+      lastLoop = now;
+
+      analyserWide.getFloatTimeDomainData(bufTimeWide);
+      const frameWideDb = rmsDb(bufTimeWide);
+      ui.frameDb.textContent = Number.isFinite(frameWideDb) ? frameWideDb.toFixed(1) : '–∞';
+
+      analyserDet.getFloatTimeDomainData(bufTimeDet);
+      const frameDetDb = rmsDb(bufTimeDet);
+      ui.pianoDb.textContent = Number.isFinite(frameDetDb) ? frameDetDb.toFixed(1) : '–∞';
+
+      analyserDet.getFloatFrequencyData(bufFreqDet);
+      const sfm = spectralFlatness(bufFreqDet);
+
+      // Noise floors
+      const activeDet = (frameDetDb - state.noiseDetDb) >= (state.running ? SNR_STOP : SNR_START);
+      const rateDet = activeDet ? 0.004 : 0.02;
+      state.noiseDetDb = (1-rateDet)*state.noiseDetDb + rateDet*frameDetDb;
+      ui.pianoNoiseDb.textContent = state.noiseDetDb.toFixed(1);
+
+      const activeWide = (frameWideDb - state.noiseWideDb) >= 6;
+      const rateWide = activeWide ? 0.004 : 0.02;
+      state.noiseWideDb = (1-rateWide)*state.noiseWideDb + rateWide*frameWideDb;
+      ui.noiseDb.textContent = state.noiseWideDb.toFixed(1);
+
+      const snrDet = frameDetDb - state.noiseDetDb;
+      ui.pianoSnr.textContent = snrDet.toFixed(1);
+      drawMeter(Math.max(0, snrDet));
+
+      const nowEpoch = Date.now();
+
+      // Plan A: SNR + tonal + pitch grid
+      const tonal = sfm < SFM_MAX;
+      let pitchOk = false, f0=0, midi=0, cents=999, peak=0;
+      if (tonal && snrDet >= (state.running ? SNR_STOP : SNR_START)) {
+        const est = estimateF0(bufTimeDet, audio.sampleRate);
+        f0 = est.f0; peak = est.peak;
+        if (f0 >= 130 && f0 <= 523) {
+          midi = hzToMidi(f0);
+          const nearest = Math.round(midi);
+          cents = 100*(midi - nearest);
+          const absCents = Math.abs(cents);
+          const needCents = state.running ? CentsKeep : CentsStart;
+          const needPeak  = state.running ? PeakKeep  : PeakStart;
+          if (absCents <= needCents && peak >= needPeak) {
+            if (state.lastMidi !== null && Math.round(state.lastMidi) === nearest) state.stableCount += 1;
+            else state.stableCount = 1;
+            state.lastMidi = midi;
+            pitchOk = (state.running ? true : state.stableCount >= NeedStableFrames);
+          } else {
+            state.stableCount = 0;
+          }
+        } else {
+          state.stableCount = 0;
+        }
+      } else {
+        state.stableCount = 0;
+      }
+
+      // Diagnostics
+      const names=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+      const nIdx = Math.round(midi) % 12;
+      const note = isFinite(midi) ? `${names[nIdx]}${Math.floor(Math.round(midi)/12 - 1)}` : '—';
+      ui.pitchDiag.textContent = `f0: ${f0?f0.toFixed(1):'—'} Hz (${note}), cents: ${isFinite(cents)?cents.toFixed(1):'—'}, peak: ${peak.toFixed(2)}`;
+
+      if (state.auto) {
+        ui.detStatus.textContent = tonal ? (pitchOk ? 'piano-like' : 'tonal, off-grid') : 'not-tonal';
+        if (pitchOk) {
+          state.consecActive++;
+          if (!state.running && state.consecActive >= 2) startTimer(nowEpoch);
+          state.lastHeardTs = nowEpoch;
+        } else {
+          state.consecActive = 0;
+          if (state.running && (nowEpoch - state.lastHeardTs)/1000 >= SILENCE_S) pauseTimer(nowEpoch);
+        }
+      } else {
+        ui.detStatus.textContent = 'auto off';
+      }
+    };
+    loop();
+  };
+
+  const disableMic = () => {
+    if (raf) cancelAnimationFrame(raf);
+    try { const tracks = (window.__mic || {}).getTracks?.() || []; tracks.forEach(t=>t.stop()); } catch(e){}
+    if (audio && audio.state!=='closed') audio.close();
+    audio=null; micStream=null; analyserWide=null; analyserDet=null;
+    ui.btnEnable.disabled=false; ui.btnDisable.disabled=true;
+  };
+
+  // Buttons
+  ui.btnEnable.addEventListener('click', enableMic);
+  ui.btnDisable.addEventListener('click', disableMic);
+  ui.btnAuto.addEventListener('click', () => {
+    state.auto = !state.auto;
+    ui.btnAuto.textContent = 'Auto: ' + (state.auto ? 'ON' : 'OFF');
+    ui.btnAuto.className = 'btn ' + (state.auto ? 'success' : 'secondary');
+    if (state.auto && state.running) state.lastHeardTs = Date.now();
+  });
+  ui.btnManualStart.addEventListener('click', () => {
+    state.auto = false; ui.btnAuto.textContent='Auto: OFF'; ui.btnAuto.className='btn secondary'; startTimer(Date.now());
+  });
+  ui.btnManualPause.addEventListener('click', () => {
+    state.auto = false; ui.btnAuto.textContent='Auto: OFF'; ui.btnAuto.className='btn secondary'; pauseTimer(Date.now());
+  });
+
+  // Sliders
+  const sync = () => {
+    SNR_START = parseFloat(ui.snrStart.value); ui.snrStartLbl.textContent = SNR_START;
+    SNR_STOP  = parseFloat(ui.snrStop.value);  ui.snrStopLbl.textContent  = SNR_STOP;
+    SILENCE_S = parseFloat(ui.silence.value);  ui.silenceLbl.textContent  = SILENCE_S;
+  };
+  ['snrStart','snrStop','silence'].forEach(id => ui[id].addEventListener('input', sync));
+  sync();
+
+  // Pause if backgrounded
+  document.addEventListener('visibilitychange', () => { if (document.hidden && state.running) pauseTimer(Date.now()); });
+})();</script>
+</body>
+</html>

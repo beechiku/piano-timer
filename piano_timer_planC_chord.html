@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Piano Timer – Plan C (Chord-aware)</title>
+<style>
+  :root { --bg:#0f1115; --card:#151922; --text:#e6e6e6; --muted:#a0a6b0; --accent:#4aa3ff; --green:#6cffb7; --danger:#ff6b6b; }
+  html,body{margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+  .wrap{max-width:760px;margin:24px auto;padding:0 16px 56px}
+  h1{font-size:22px;margin:8px 0 12px}
+  .card{background:var(--card);border:1px solid #222632;border-radius:16px;padding:16px;box-shadow:0 8px 32px rgba(0,0,0,.32)}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .btn{padding:12px 14px;border-radius:12px;border:1px solid transparent;font-weight:800;cursor:pointer}
+  .primary{background:var(--accent);color:#00111f}
+  .secondary{background:#273145;color:var(--text);border-color:#38445c}
+  .success{background:var(--green);color:#002b1b}
+  .pill{padding:6px 10px;border-radius:999px;border:1px solid #2a3346;font-size:12px}
+  .idle{background:rgba(255,107,107,.15);color:var(--danger)}
+  .run{background:rgba(108,255,183,.15);color:var(--green)}
+  .pause{background:rgba(74,163,255,.15);color:var(--accent)}
+  .center{display:flex;align-items:center;justify-content:center;text-align:center}
+  .totalTimer{font-variant-numeric:tabular-nums;font-weight:900;font-size:64px;line-height:1;margin:6px 0 10px;color:var(--green)}
+  .label{color:var(--muted);font-size:12px}
+  .value{font-variant-numeric:tabular-nums;font-weight:900;font-size:22px}
+  .stat{background:#10141b;border:1px solid #1f2531;border-radius:12px;padding:12px}
+  .grid{display:grid;gap:10px}
+  .two{grid-template-columns:repeat(2,minmax(0,1fr))}
+  canvas{width:100%;height:90px;background:#0b0e13;border:1px solid #1a2130;border-radius:10px}
+  .slider{width:100%}
+  .small{color:var(--muted);font-size:12px}
+  .diag{color:var(--muted);font-size:12px;margin-top:6px;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🎹 Piano Timer</h1>
+  <div class="card grid">
+    <div class="row">
+      <button id="btnEnable" class="btn primary">Enable Mic</button>
+      <button id="btnDisable" class="btn secondary" disabled>Disable Mic</button>
+      <button id="btnAuto" class="btn success">Auto: ON</button>
+      <button id="btnManualStart" class="btn secondary">▶ Manual Start</button>
+      <button id="btnManualPause" class="btn secondary">⏸ Manual Pause</button>
+      <span id="badge" class="pill idle">IDLE</span>
+    </div>
+
+    <div class="center">
+      <div>
+        <div class="label">Total (since open)</div>
+        <div id="total" class="totalTimer">00:00:00</div>
+      </div>
+    </div>
+
+    <div class="grid two">
+      <div class="stat"><div class="label">Frame level (wide band dB)</div><div id="frameDb" class="value">–∞</div></div>
+      <div class="stat"><div class="label">Noise floor (wide dB)</div><div id="noiseDb" class="value">–60.0</div></div>
+    </div>
+
+    <div class="grid two">
+      <div class="stat"><div class="label">Piano band (C3–C5) dB</div><div id="pianoDb" class="value">–∞</div></div>
+      <div class="stat"><div class="label">Piano noise floor (dB)</div><div id="pianoNoiseDb" class="value">–60.0</div></div>
+    </div>
+
+    <div class="grid two">
+      <div class="stat"><div class="label">Piano SNR (dB)</div><div id="pianoSnr" class="value">0.0</div></div>
+      <div class="stat"><div class="label">Detector status</div><div id="detStatus" class="value">idle</div></div>
+    </div>
+
+    <div>
+      <canvas id="meter"></canvas>
+      <div class="small">Plan C: chord-aware harmonic comb-bank (C3–C5) + anti-drift. Meter shows SNR (0–20 dB).</div>
+      <div class="diag" id="pitchDiag">Notes: —
+Scores: —</div>
+    </div>
+
+    <details>
+      <summary>Advanced detection settings</summary>
+      <div class="grid">
+        <label>Start SNR threshold (dB): <span id="snrStartLbl">12</span>
+          <input id="snrStart" class="slider" type="range" min="3" max="20" step="1" value="12">
+        </label>
+        <label>Stop SNR threshold (dB): <span id="snrStopLbl">10</span>
+          <input id="snrStop" class="slider" type="range" min="0" max="18" step="1" value="10">
+        </label>
+        <label>Silence to pause (seconds): <span id="silenceLbl">10</span>
+          <input id="silence" class="slider" type="range" min="3" max="30" step="1" value="10">
+        </label>
+      </div>
+    </details>
+  </div>
+</div>
+
+<script>
+(() => {
+  const ui = {
+    btnEnable: document.getElementById('btnEnable'),
+    btnDisable: document.getElementById('btnDisable'),
+    btnAuto: document.getElementById('btnAuto'),
+    btnManualStart: document.getElementById('btnManualStart'),
+    btnManualPause: document.getElementById('btnManualPause'),
+    badge: document.getElementById('badge'),
+    total: document.getElementById('total'),
+    frameDb: document.getElementById('frameDb'),
+    noiseDb: document.getElementById('noiseDb'),
+    pianoDb: document.getElementById('pianoDb'),
+    pianoNoiseDb: document.getElementById('pianoNoiseDb'),
+    pianoSnr: document.getElementById('pianoSnr'),
+    detStatus: document.getElementById('detStatus'),
+    snrStart: document.getElementById('snrStart'),
+    snrStartLbl: document.getElementById('snrStartLbl'),
+    snrStop: document.getElementById('snrStop'),
+    snrStopLbl: document.getElementById('snrStopLbl'),
+    silence: document.getElementById('silence'),
+    silenceLbl: document.getElementById('silenceLbl'),
+    meter: document.getElementById('meter'),
+    pitchDiag: document.getElementById('pitchDiag')
+  };
+
+  // Parameters
+  let SNR_START = parseFloat(ui.snrStart.value);
+  let SNR_STOP  = parseFloat(ui.snrStop.value);
+  let SILENCE_S = parseFloat(ui.silence.value);
+
+  // Anti-drift & band
+  const HP_HZ = 180, LP_HZ = 1000;
+  const SFM_MAX = 0.45;
+  const NeedFramesStart = 2; // frames meeting chord criteria to start
+  const NeedFramesKeep  = 1; // frames per window to keep
+  const WindowMs = 100;
+
+  // Comb-bank scoring
+  const NoteLow = 48; // C3
+  const NoteHigh = 72; // C5
+  const HarmWeights = [1.0, 0.5, 0.25];
+  const CombStart = 2.2; // minimum score ratio vs local noise to accept a note at start
+  const CombKeep  = 1.8; // for keep
+  const MinNotesStart = 2; // need >=2 simultaneous notes OR one very strong
+  const StrongSingle = 3.0; // accept if top note >= this
+
+  // State
+  let raf=0, baselineLocked=false, baselineDb=-62, baselineSamples=0;
+  const state = {
+    auto:true,
+    running:false,
+    startTs:0,
+    accumulated:0,
+    lastHeardTs:0,
+    noiseWideDb:-62,
+    noiseDetDb:-62,
+    consecActive:0
+  };
+
+  // Audio nodes
+  let audio=null, micStream=null, analyserWide=null, analyserDet=null;
+  let bufTimeWide=null, bufTimeDet=null, bufFreqDet=null;
+
+  // Helpers
+  const fmt = s => { s=Math.floor(s); const h=String(Math.floor(s/3600)).padStart(2,'0'); const m=String(Math.floor((s%3600)/60)).padStart(2,'0'); const ss=String(s%60).padStart(2,'0'); return `${h}:${m}:${ss}`; };
+  const setBadge = kind => { ui.badge.className = 'pill ' + kind; ui.badge.textContent = kind==='run'?'RUNNING':kind==='pause'?'PAUSED':'IDLE'; };
+  const totalSeconds = () => state.running ? state.accumulated + ((Date.now() - state.startTs)/1000) : state.accumulated;
+  const rmsDb = arr => { let sum=0; for (let i=0;i<arr.length;i++){ const v=arr[i]; sum += v*v; } const rms = Math.sqrt(sum/arr.length + 1e-12); return 20*Math.log10(rms + 1e-12); };
+  const dbToLin = db => Math.pow(10, db/10);
+  const spectralFlatness = (freqDb) => {
+    let geo=0, arith=0, n=freqDb.length;
+    for (let i=0;i<n;i++){ const mag=Math.pow(10, freqDb[i]/20); const x=Math.max(1e-12,mag); geo+=Math.log(x); arith+=x; }
+    const gm = Math.exp(geo/n), am = arith/n;
+    return gm/(am+1e-12);
+  };
+  const midiToHz = m => 440 * Math.pow(2, (m-69)/12);
+  const nameOf = m => {
+    const names=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+    const r=Math.round(m); return `${names[r%12]}${Math.floor(r/12 - 1)}`;
+  };
+
+  const drawMeter = snr => {
+    const ctx = ui.meter.getContext('2d');
+    const w = ui.meter.width = ui.meter.clientWidth * devicePixelRatio;
+    const h = ui.meter.height = ui.meter.clientHeight * devicePixelRatio;
+    ctx.clearRect(0,0,w,h);
+    const barW=w-20, barH=h-20;
+    ctx.fillStyle='#121822'; ctx.fillRect(10,10,barW,barH);
+    const val=Math.max(0,Math.min(1,snr/20));
+    ctx.fillStyle='#4aa3ff'; ctx.fillRect(10,10,val*barW,barH);
+    ctx.strokeStyle='#283246'; ctx.strokeRect(10,10,barW,barH);
+  };
+
+  // Comb score for a given MIDI note using FFT (C3–C5), compare to local noise bands
+  const combScore = (freqDb, sr, fftSize, midi) => {
+    const binHz = sr/fftSize;
+    const f1 = midiToHz(midi);
+    if (f1 < 130 || f1 > 523) return 0;
+    const harmonics = [f1, f1*2, f1*3].filter(f=>f <= LP_HZ);
+    let H=0, N=0;
+    const len=freqDb.length;
+    const sampleBand = (hz, w=1) => {
+      const idx = Math.round(hz/binHz);
+      const i0 = Math.max(1, idx-w), i1 = Math.min(len-1, idx+w);
+      let s=0; for (let i=i0;i<=i1;i++) s += dbToLin(freqDb[i]);
+      return s/(i1-i0+1);
+    };
+    const sideNoise = (hz) => {
+      const idx = Math.round(hz/binHz);
+      const l0 = Math.max(1, idx-5), l1 = Math.max(1, idx-3);
+      const r0 = Math.min(len-2, idx+3), r1 = Math.min(len-2, idx+5);
+      const l = (dbToLin(freqDb[l0]) + dbToLin(freqDb[l1]))/2;
+      const r = (dbToLin(freqDb[r0]) + dbToLin(freqDb[r1]))/2;
+      return (l+r)/2;
+    };
+    harmonics.forEach((hz, i) => {
+      const w = HarmWeights[i];
+      H += w * sampleBand(hz, 1);
+      N += w * sideNoise(hz);
+    });
+    return N<=0 ? 0 : H/N;
+  };
+
+  const startTimer = now => { if (!state.running) { state.running=true; state.startTs=now; setBadge('run'); } };
+  const pauseTimer = now => { if (state.running) { state.accumulated += (now - state.startTs)/1000; state.running=false; setBadge('pause'); } };
+
+  setInterval(() => { ui.total.textContent = fmt(totalSeconds()); }, 250);
+
+  const enableMic = async () => {
+    try{
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      audio = new AudioCtx({latencyHint:'interactive'});
+      await audio.resume();
+      const sr = audio.sampleRate;
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false }});
+      const src = audio.createMediaStreamSource(micStream);
+
+      // Wide band for UI
+      const hpWide = audio.createBiquadFilter(); hpWide.type='highpass'; hpWide.frequency.value=120;
+      const lpWide = audio.createBiquadFilter(); lpWide.type='lowpass';  lpWide.frequency.value=4000;
+      analyserWide = audio.createAnalyser(); analyserWide.fftSize=2048; analyserWide.smoothingTimeConstant=0.2;
+      src.connect(hpWide).connect(lpWide).connect(analyserWide);
+
+      // Detection band
+      const hpDet = audio.createBiquadFilter(); hpDet.type='highpass'; hpDet.frequency.value=HP_HZ;
+      const lpDet = audio.createBiquadFilter(); lpDet.type='lowpass';  lpDet.frequency.value=LP_HZ;
+      analyserDet = audio.createAnalyser(); analyserDet.fftSize=2048; analyserDet.smoothingTimeConstant=0.12;
+      src.connect(hpDet).connect(lpDet).connect(analyserDet);
+
+      bufTimeWide = new Float32Array(analyserWide.fftSize);
+      bufTimeDet  = new Float32Array(analyserDet.fftSize);
+      bufFreqDet  = new Float32Array(analyserDet.frequencyBinCount);
+
+      ui.btnEnable.disabled = true; ui.btnDisable.disabled = false;
+      baselineLocked=false; baselineDb=-62; baselineSamples=0;
+
+      let lastLoop = performance.now();
+      const FRAME_MS = WindowMs;
+      const loop = () => {
+        raf = requestAnimationFrame(loop);
+        const now = performance.now();
+        if (now - lastLoop < FRAME_MS) return;
+        lastLoop = now;
+
+        analyserWide.getFloatTimeDomainData(bufTimeWide);
+        const frameWideDb = rmsDb(bufTimeWide);
+        ui.frameDb.textContent = Number.isFinite(frameWideDb) ? frameWideDb.toFixed(1) : '–∞';
+
+        analyserDet.getFloatTimeDomainData(bufTimeDet);
+        const frameDetDb = rmsDb(bufTimeDet);
+        ui.pianoDb.textContent = Number.isFinite(frameDetDb) ? frameDetDb.toFixed(1) : '–∞';
+
+        analyserDet.getFloatFrequencyData(bufFreqDet);
+        const sfm = spectralFlatness(bufFreqDet);
+
+        // Baseline capture & anti-drift noise update
+        const snrTmp = frameDetDb - state.noiseDetDb;
+        const quietFrame = (snrTmp < 3) || (sfm >= SFM_MAX);
+        if (!baselineLocked) {
+          if (quietFrame) {
+            baselineDb = (baselineSamples * baselineDb + frameDetDb) / (baselineSamples + 1);
+            baselineSamples++;
+            if (baselineSamples >= 20) { baselineLocked = true; state.noiseDetDb = baselineDb; }
+          }
+        }
+        if (baselineLocked) {
+          const updateAllowed = (sfm >= SFM_MAX) && (snrTmp < 3);
+          if (updateAllowed) {
+            const rate = 0.02;
+            state.noiseDetDb = (1-rate)*state.noiseDetDb + rate*frameDetDb;
+            state.noiseDetDb = Math.min(state.noiseDetDb, baselineDb + 6);
+          }
+        } else {
+          const rate = quietFrame ? 0.04 : 0.0;
+          state.noiseDetDb = (1-rate)*state.noiseDetDb + rate*frameDetDb;
+        }
+        ui.pianoNoiseDb.textContent = state.noiseDetDb.toFixed(1);
+
+        // Wide-band noise info
+        const activeWide = (frameWideDb - state.noiseWideDb) >= 6;
+        const rateWide = activeWide ? 0.004 : 0.02;
+        state.noiseWideDb = (1-rateWide)*state.noiseWideDb + rateWide*frameWideDb;
+        ui.noiseDb.textContent = state.noiseWideDb.toFixed(1);
+
+        const snrDet = frameDetDb - state.noiseDetDb;
+        ui.pianoSnr.textContent = snrDet.toFixed(1);
+        drawMeter(Math.max(0, snrDet));
+
+        const nowEpoch = Date.now();
+
+        // If auto armed and SNR + tonality ok, run comb-bank chord test
+        let chordOk = false, chosenNotes = [];
+        if (snrDet >= (state.running ? SNR_STOP : SNR_START) && sfm < SFM_MAX) {
+          const scores = [];
+          for (let m=NoteLow; m<=NoteHigh; m++) {
+            const sc = combScore(bufFreqDet, sr, analyserDet.fftSize, m);
+            scores.push([m, sc]);
+          }
+          // sort by score desc
+          scores.sort((a,b)=>b[1]-a[1]);
+          const top = scores.slice(0,5);
+          const threshold = state.running ? CombKeep : CombStart;
+          const passing = top.filter(([m,s]) => s >= threshold);
+          if (passing.length >= MinNotesStart) chordOk = true;
+          else if (top.length && top[0][1] >= StrongSingle) chordOk = true; // single very strong
+          chosenNotes = top;
+        }
+
+        // Diagnostics
+        const noteList = chosenNotes.map(([m,s]) => `${nameOf(m)}:${s.toFixed(2)}`).join(', ');
+        ui.pitchDiag.textContent = `Notes: ${chosenNotes.length?noteList:'—'}\nScores: top=${chosenNotes.length?chosenNotes[0][1].toFixed(2):'—'} (need ≥ ${state.running?CombKeep:CombStart})`;
+
+        if (state.auto) {
+          ui.detStatus.textContent = chordOk ? 'piano-like (chord)' : (sfm < SFM_MAX ? 'tonal, off-grid' : 'not-tonal');
+          if (chordOk) {
+            state.consecActive++;
+            const need = state.running ? NeedFramesKeep : NeedFramesStart;
+            if (!state.running && state.consecActive >= need) startTimer(nowEpoch);
+            state.lastHeardTs = nowEpoch;
+          } else {
+            state.consecActive = 0;
+            if (state.running && (nowEpoch - state.lastHeardTs)/1000 >= SILENCE_S) pauseTimer(nowEpoch);
+          }
+        } else {
+          ui.detStatus.textContent = 'auto off';
+        }
+      };
+      loop();
+    } catch(e) {
+      alert('Mic error: ' + (e && e.message ? e.message : e));
+    }
+  };
+
+  const disableMic = () => {
+    if (raf) cancelAnimationFrame(raf);
+    if (micStream) { try { micStream.getTracks().forEach(t => t.stop()); } catch(e){} }
+    if (audio && audio.state!=='closed') { try { audio.close(); } catch(e){} }
+    audio=null; micStream=null; analyserWide=null; analyserDet=null;
+    bufTimeWide=bufTimeDet=bufFreqDet=null;
+    ui.btnEnable.disabled=false; ui.btnDisable.disabled=true;
+    baselineLocked=false; baselineDb=-62; baselineSamples=0;
+  };
+
+  // Buttons
+  ui.btnEnable.addEventListener('click', enableMic);
+  ui.btnDisable.addEventListener('click', disableMic);
+  ui.btnAuto.addEventListener('click', () => {
+    state.auto = !state.auto;
+    ui.btnAuto.textContent = 'Auto: ' + (state.auto ? 'ON' : 'OFF');
+    ui.btnAuto.className = 'btn ' + (state.auto ? 'success' : 'secondary');
+    if (state.auto && state.running) state.lastHeardTs = Date.now();
+  });
+  ui.btnManualStart.addEventListener('click', () => {
+    state.auto = false; ui.btnAuto.textContent='Auto: OFF'; ui.btnAuto.className='btn secondary'; startTimer(Date.now());
+  });
+  ui.btnManualPause.addEventListener('click', () => {
+    state.auto = false; ui.btnAuto.textContent='Auto: OFF'; ui.btnAuto.className='btn secondary'; pauseTimer(Date.now());
+  });
+
+  // Sliders
+  const sync = () => {
+    SNR_START = parseFloat(ui.snrStart.value); ui.snrStartLbl.textContent = SNR_START;
+    SNR_STOP  = parseFloat(ui.snrStop.value);  ui.snrStopLbl.textContent  = SNR_STOP;
+    SILENCE_S = parseFloat(ui.silence.value);  ui.silenceLbl.textContent  = SILENCE_S;
+  };
+  ['snrStart','snrStop','silence'].forEach(id => ui[id].addEventListener('input', sync));
+  sync();
+
+  document.addEventListener('visibilitychange', () => { if (document.hidden && state.running) pauseTimer(Date.now()); });
+})();</script>
+</body>
+</html>

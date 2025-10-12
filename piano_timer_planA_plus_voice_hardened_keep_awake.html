@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Piano Timer – Plan A+ (Voice‑Hardened, Drift‑Locked, Keep Awake)</title>
+<style>
+  :root { --bg:#0f1115; --card:#151922; --text:#e6e6e6; --muted:#a0a6b0; --accent:#4aa3ff; --green:#6cffb7; --danger:#ff6b6b; }
+  html,body{margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+  .wrap{max-width:760px;margin:24px auto;padding:0 16px 56px}
+  h1{font-size:22px;margin:8px 0 12px}
+  .card{background:var(--card);border:1px solid #222632;border-radius:16px;padding:16px;box-shadow:0 8px 32px rgba(0,0,0,.32)}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .btn{padding:12px 14px;border-radius:12px;border:1px solid transparent;font-weight:800;cursor:pointer}
+  .primary{background:var(--accent);color:#00111f}
+  .secondary{background:#273145;color:var(--text);border-color:#38445c}
+  .success{background:var(--green);color:#002b1b}
+  .pill{padding:6px 10px;border-radius:999px;border:1px solid #2a3346;font-size:12px}
+  .idle{background:rgba(255,107,107,.15);color:var(--danger)}
+  .run{background:rgba(108,255,183,.15);color:var(--green)}
+  .pause{background:rgba(74,163,255,.15);color:var(--accent)}
+  .center{display:flex;align-items:center;justify-content:center;text-align:center}
+  .totalTimer{font-variant-numeric:tabular-nums;font-weight:900;font-size:64px;line-height:1;margin:6px 0 10px;color:var(--green)}
+  .label{color:var(--muted);font-size:12px}
+  .value{font-variant-numeric:tabular-nums;font-weight:900;font-size:22px}
+  .stat{background:#10141b;border:1px solid #1f2531;border-radius:12px;padding:12px}
+  .grid{display:grid;gap:10px}
+  .two{grid-template-columns:repeat(2,minmax(0,1fr))}
+  canvas{width:100%;height:90px;background:#0b0e13;border:1px solid #1a2130;border-radius:10px}
+  .slider{width:100%}
+  .small{color:var(--muted);font-size:12px}
+  .diag{color:var(--muted);font-size:12px;margin-top:6px;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🎹 Piano Timer</h1>
+  <div class="card grid">
+    <div class="row">
+      <button id="btnEnable" class="btn primary">Enable Mic</button>
+      <button id="btnDisable" class="btn secondary" disabled>Disable Mic</button>
+      <button id="btnAuto" class="btn success">Auto: ON</button>
+      <button id="btnManualStart" class="btn secondary">▶ Manual Start</button>
+      <button id="btnManualPause" class="btn secondary">⏸ Manual Pause</button>
+      <span id="badge" class="pill idle">IDLE</span>
+    </div>
+
+    <div class="center">
+      <div>
+        <div class="label">Total (since open)</div>
+        <div id="total" class="totalTimer">00:00:00</div>
+      </div>
+    </div>
+
+    <div class="grid two">
+      <div class="stat"><div class="label">Frame level (wide band dB)</div><div id="frameDb" class="value">–∞</div></div>
+      <div class="stat"><div class="label">Noise floor (wide dB)</div><div id="noiseDb" class="value">–60.0</div></div>
+    </div>
+
+    <div class="grid two">
+      <div class="stat"><div class="label">Piano band (C3–C5) dB</div><div id="pianoDb" class="value">–∞</div></div>
+      <div class="stat"><div class="label">Piano noise floor (dB)</div><div id="pianoNoiseDb" class="value">–60.0</div></div>
+    </div>
+
+    <div class="grid two">
+      <div class="stat"><div class="label">Piano SNR (dB)</div><div id="pianoSnr" class="value">0.0</div></div>
+      <div class="stat"><div class="label">Detector status</div><div id="detStatus" class="value">idle</div></div>
+    </div>
+
+    <div>
+      <canvas id="meter"></canvas>
+      <div class="small">Plan A+ hardened: stricter voice rejection, formant veto, drift lock baseline. Screen will be kept awake while mic is enabled.</div>
+      <div class="diag" id="pitchDiag">f0: — Hz (—), cents: —, H/N: —, SFM: —, voice: —</div>
+    </div>
+
+    <details>
+      <summary>Advanced detection settings</summary>
+      <div class="grid">
+        <label>Start SNR threshold (dB): <span id="snrStartLbl">12</span>
+          <input id="snrStart" class="slider" type="range" min="3" max="20" step="1" value="12">
+        </label>
+        <label>Stop SNR threshold (dB): <span id="snrStopLbl">10</span>
+          <input id="snrStop" class="slider" type="range" min="0" max="18" step="1" value="10">
+        </label>
+        <label>Silence to pause (seconds): <span id="silenceLbl">10</span>
+          <input id="silence" class="slider" type="range" min="3" max="30" step="1" value="10">
+        </label>
+      </div>
+    </details>
+  </div>
+</div>
+
+<script>
+/* ---- Inline NoSleep (tiny) ---- */
+class NoSleepLite {
+  constructor(){
+    this.enabled = false;
+    this.video = document.createElement('video');
+    this.video.setAttribute('playsinline','');
+    this.video.setAttribute('muted','');
+    this.video.setAttribute('loop','');
+    this.video.style.position='fixed';
+    this.video.style.opacity='0';
+    this.video.style.pointerEvents='none';
+    this.video.style.width='1px';
+    this.video.style.height='1px';
+    this.video.src = 'data:video/mp4;base64,AAAAIGZ0eXBpc29tAAAAAGlzb21pc28yYXZjMQAAAAhmcmVlAAAAGG1kYXQAAAAAAAACAAACAAAAAAABAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    document.body.appendChild(this.video);
+  }
+  async enable(){
+    if (this.enabled) return;
+    try { await this.video.play(); this.enabled = true; } catch(e){}
+  }
+  disable(){
+    try { this.video.pause(); } catch(e){} this.enabled = false;
+  }
+}
+
+(() => {
+  const ui = {
+    btnEnable: document.getElementById('btnEnable'),
+    btnDisable: document.getElementById('btnDisable'),
+    btnAuto: document.getElementById('btnAuto'),
+    btnManualStart: document.getElementById('btnManualStart'),
+    btnManualPause: document.getElementById('btnManualPause'),
+    badge: document.getElementById('badge'),
+    total: document.getElementById('total'),
+    frameDb: document.getElementById('frameDb'),
+    noiseDb: document.getElementById('noiseDb'),
+    pianoDb: document.getElementById('pianoDb'),
+    pianoNoiseDb: document.getElementById('pianoNoiseDb'),
+    pianoSnr: document.getElementById('pianoSnr'),
+    detStatus: document.getElementById('detStatus'),
+    snrStart: document.getElementById('snrStart'),
+    snrStartLbl: document.getElementById('snrStartLbl'),
+    snrStop: document.getElementById('snrStop'),
+    snrStopLbl: document.getElementById('snrStopLbl'),
+    silence: document.getElementById('silence'),
+    silenceLbl: document.getElementById('silenceLbl'),
+    meter: document.getElementById('meter'),
+    pitchDiag: document.getElementById('pitchDiag')
+  };
+
+  const noSleep = new NoSleepLite();
+
+  // Tunables (voice-hardened)
+  let SNR_START = parseFloat(ui.snrStart.value);
+  let SNR_STOP  = parseFloat(ui.snrStop.value);
+  let SILENCE_S = parseFloat(ui.silence.value);
+  const SFM_MAX = 0.25;
+  const CentsWin = 25;
+  const PeakMin  = 0.45;
+  const HNminStart = 3.2;
+  const HNminKeep  = 3.0;
+  const NeedStableFramesStart = 2;
+  const NeedStableFramesKeep  = 1;
+  const HP_HZ = 180, LP_HZ = 1000;
+  const WindowMs = 100;
+  const OnsetStart = 1.6;
+
+  // Hard anti-drift
+  const QuietSfm = 0.70;
+  const QuietSnr = 1.0;
+  const DecayRate = 0.005;
+  const DecayAfterMs = 3000;
+  const BaselineSnapMs = 60000;
+  const BaselineDownMax = 3;
+
+  // State
+  let raf=0, baselineLocked=false, baselineDb=-62, baselineSamples=0, prevMag=null, quietStreakMs=0, quietSnapMs=0;
+  const state = {
+    auto:true,
+    running:false,
+    startTs:0,
+    accumulated:0,
+    lastHeardTs:0,
+    noiseWideDb:-62,
+    noiseDetDb:-62,
+    consecActive:0,
+    stableCount:0,
+    lastMidi:null
+  };
+
+  // Audio nodes
+  let audio=null, micStream=null, analyserWide=null, analyserDet=null, analyserForm=null;
+  let bufTimeWide=null, bufTimeDet=null, bufFreqDet=null, bufFormantDb=null;
+
+  const fmt = s => { s=Math.floor(s); const h=String(Math.floor(s/3600)).padStart(2,'0'); const m=String(Math.floor((s%3600)/60)).padStart(2,'0'); const ss=String(s%60).padStart(2,'0'); return `${h}:${m}:${ss}`; };
+  const setBadge = kind => { ui.badge.className = 'pill ' + kind; ui.badge.textContent = kind==='run'?'RUNNING':kind==='PAUSED'?'PAUSED':'IDLE'; };
+  const totalSeconds = () => state.running ? state.accumulated + ((Date.now() - state.startTs)/1000) : state.accumulated;
+  const rmsDb = arr => { let sum=0; for (let i=0;i<arr.length;i++){ const v=arr[i]; sum += v*v; } const rms = Math.sqrt(sum/arr.length + 1e-12); return 20*Math.log10(rms + 1e-12); };
+  const dbToLin = db => Math.pow(10, db/10);
+  const hzToMidi = hz => 69 + 12*Math.log2(hz/440);
+  const spectralFlatness = (freqDb) => {
+    let geo=0, arith=0, n=freqDb.length;
+    for (let i=0;i<n;i++){ const mag=Math.pow(10, freqDb[i]/20); const x=Math.max(1e-12,mag); geo+=Math.log(x); arith+=x; }
+    const gm = Math.exp(geo/n), am = arith/n;
+    return gm/(am+1e-12);
+  };
+
+  const estimateF0 = (x, sr) => {
+    const n = x.length;
+    let mean=0; for (let i=0;i<n;i++) mean+=x[i]; mean/=n;
+    let energy0=0;
+    const w = Math.PI*2/(n-1);
+    const y = new Float32Array(n);
+    for (let i=0;i<n;i++){ const v = (x[i]-mean) * (0.5 - 0.5*Math.cos(w*i)); y[i]=v; energy0 += v*v; }
+    if (energy0 < 1e-8) return {f0:0, peak:0};
+    const minLag = Math.floor(sr/523.25);
+    const maxLag = Math.ceil(sr/130.81);
+    let bestLag=minLag, best=0;
+    for (let lag=minLag; lag<=maxLag; lag++){
+      let sum=0, e=0;
+      for (let i=0;i<n-lag;i++){ const a=y[i], b=y[i+lag]; sum += a*b; e += a*a; }
+      const r = sum / Math.max(1e-8, e);
+      if (r > best){ best=r; bestLag=lag; }
+    }
+    return {f0: sr/bestLag, peak: best};
+  };
+
+  const drawMeter = snr => {
+    const ctx = ui.meter.getContext('2d');
+    const w = ui.meter.width = ui.meter.clientWidth * devicePixelRatio;
+    const h = ui.meter.height = ui.meter.clientHeight * devicePixelRatio;
+    ctx.clearRect(0,0,w,h);
+    const barW=w-20, barH=h-20;
+    ctx.fillStyle='#121822'; ctx.fillRect(10,10,barW,barH);
+    const val=Math.max(0,Math.min(1,snr/20));
+    ctx.fillStyle='#4aa3ff'; ctx.fillRect(10,10,val*barW,barH);
+    ctx.strokeStyle='#283246'; ctx.strokeRect(10,10,barW,barH);
+  };
+
+  const harmonicity = (freqDb, sr, fftSize, f0) => {
+    const binHz = sr/fftSize, len=freqDb.length;
+    const sampleAt = (hz, w=1) => {
+      const idx = Math.round(hz/binHz);
+      const i0 = Math.max(1, idx-w), i1 = Math.min(len-1, idx+w);
+      let s=0; for (let i=i0;i<=i1;i++) s += dbToLin(freqDb[i]);
+      return s/(i1-i0+1);
+    };
+    const side = (hz) => {
+      const idx = Math.round(hz/binHz);
+      const l0=Math.max(1,idx-5), l1=Math.max(1,idx-3);
+      const r0=Math.min(len-2,idx+3), r1=Math.min(len-2,idx+5);
+      const l=(dbToLin(freqDb[l0])+dbToLin(freqDb[l1]))/2;
+      const r=(dbToLin(freqDb[r0])+dbToLin(freqDb[r1]))/2;
+      return (l+r)/2;
+    };
+    const f1=f0, f2=f0*2, f3=f0*3;
+    if (f3 > LP_HZ) return 0;
+    const H = sampleAt(f1)+0.5*sampleAt(f2)+0.25*sampleAt(f3);
+    const N = side(f1)+0.5*side(f2)+0.25*side(f3);
+    return H / Math.max(1e-12, N);
+  };
+
+  const gridPeaks = (freqDb, sr, fftSize) => {
+    const binHz = sr/fftSize;
+    const peaks = [];
+    for (let k=2; k<freqDb.length-2; k++){
+      const v = freqDb[k];
+      if (v>freqDb[k-1] && v>freqDb[k+1] && v>freqDb[k-2] && v>freqDb[k+2]){
+        const hz = k*binHz;
+        if (hz<130 || hz>523) continue;
+        const midi = hzToMidi(hz);
+        const nearest = Math.round(midi);
+        const cents = 100*(midi - nearest);
+        if (Math.abs(cents) <= 20){
+          const HN = harmonicity(freqDb, sr, fftSize, hz);
+          peaks.push({hz, midi, cents, HN, db: v});
+        }
+      }
+    }
+    peaks.sort((a,b)=>b.db-a.db);
+    return peaks.slice(0,5);
+  };
+
+  // Band energy and centroid in [f0,f1]
+  const bandEnergy = (freqDb, sr, fftSize, f0, f1) => {
+    const binHz = sr/fftSize;
+    const i0 = Math.max(1, Math.floor(f0/binHz));
+    const i1 = Math.min(freqDb.length-1, Math.ceil(f1/binHz));
+    let sum=0; for (let i=i0;i<=i1;i++) sum += dbToLin(freqDb[i]);
+    return sum;
+  };
+  const bandCentroid = (freqDb, sr, fftSize, f0, f1) => {
+    const binHz = sr/fftSize;
+    const i0 = Math.max(1, Math.floor(f0/binHz));
+    const i1 = Math.min(freqDb.length-1, Math.ceil(f1/binHz));
+    let num=0, den=0;
+    for (let i=i0;i<=i1;i++){ const mag = dbToLin(freqDb[i]); const hz=i*binHz; num += hz*mag; den += mag; }
+    return den>0 ? num/den : 0;
+  };
+
+  const startTimer = now => { if (!state.running) { state.running=true; state.startTs=now; setBadge('run'); } };
+  const pauseTimer = now => { if (state.running) { state.accumulated += (now - state.startTs)/1000; state.running=false; setBadge('pause'); } };
+
+  setInterval(() => { ui.total.textContent = fmt(totalSeconds()); }, 250);
+
+  const enableMic = async () => {
+    try{
+      // Keep screen awake as soon as user taps
+      noSleep.enable();
+
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!audio) audio = new AudioCtx({latencyHint:'interactive'});
+      if (audio.state === 'suspended') await audio.resume();
+
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false }
+      });
+      const src = audio.createMediaStreamSource(micStream);
+
+      // Wide band for UI
+      const hpWide = audio.createBiquadFilter(); hpWide.type='highpass'; hpWide.frequency.value=120;
+      const lpWide = audio.createBiquadFilter(); lpWide.type='lowpass';  lpWide.frequency.value=4000;
+      analyserWide = audio.createAnalyser(); analyserWide.fftSize=2048; analyserWide.smoothingTimeConstant=0.2;
+      src.connect(hpWide).connect(lpWide).connect(analyserWide);
+
+      // Detection band (piano mid)
+      const hpDet = audio.createBiquadFilter(); hpDet.type='highpass'; hpDet.frequency.value=HP_HZ;
+      const lpDet = audio.createBiquadFilter(); lpDet.type='lowpass';  lpDet.frequency.value=LP_HZ;
+      analyserDet = audio.createAnalyser(); analyserDet.fftSize=2048; analyserDet.smoothingTimeConstant=0.10;
+      src.connect(hpDet).connect(lpDet).connect(analyserDet);
+
+      // Formant band for voice veto
+      const hpForm = audio.createBiquadFilter(); hpForm.type='highpass'; hpForm.frequency.value=500;
+      const lpForm = audio.createBiquadFilter(); lpForm.type='lowpass';  lpForm.frequency.value=3000;
+      analyserForm = audio.createAnalyser(); analyserForm.fftSize=2048; analyserForm.smoothingTimeConstant=0.12;
+      src.connect(hpForm).connect(lpForm).connect(analyserForm);
+
+      bufTimeWide = new Float32Array(analyserWide.fftSize);
+      bufTimeDet  = new Float32Array(analyserDet.fftSize);
+      bufFreqDet  = new Float32Array(analyserDet.frequencyBinCount);
+      bufFormantDb= new Float32Array(analyserForm.frequencyBinCount);
+
+      ui.btnEnable.disabled = true; ui.btnDisable.disabled = false;
+      baselineLocked=false; baselineDb=-62; baselineSamples=0; prevMag=null; quietStreakMs=0; quietSnapMs=0;
+      state.stableCount=0; state.lastMidi=null;
+
+      let lastLoop = performance.now();
+      const FRAME_MS = WindowMs;
+      const loop = () => {
+        raf = requestAnimationFrame(loop);
+        const now = performance.now();
+        if (now - lastLoop < FRAME_MS) return;
+        const dt = now - lastLoop;
+        lastLoop = now;
+
+        analyserWide.getFloatTimeDomainData(bufTimeWide);
+        const frameWideDb = rmsDb(bufTimeWide);
+        ui.frameDb.textContent = Number.isFinite(frameWideDb) ? frameWideDb.toFixed(1) : '–∞';
+
+        analyserDet.getFloatTimeDomainData(bufTimeDet);
+        const frameDetDb = rmsDb(bufTimeDet);
+        ui.pianoDb.textContent = Number.isFinite(frameDetDb) ? frameDetDb.toFixed(1) : '–∞';
+
+        analyserDet.getFloatFrequencyData(bufFreqDet);
+        const sfm = spectralFlatness(bufFreqDet);
+
+        // Baseline capture (~2s of quiet frames)
+        const snrTmp = frameDetDb - state.noiseDetDb;
+        const quietFrame = (snrTmp < 3) || (sfm >= SFM_MAX);
+        if (!baselineLocked) {
+          if (quietFrame) {
+            baselineDb = (baselineSamples * baselineDb + frameDetDb) / (baselineSamples + 1);
+            baselineSamples++;
+            if (baselineSamples >= 20) { baselineLocked = true; state.noiseDetDb = baselineDb; }
+          }
+        } else {
+          // After lock: NEVER raise noise floor; only slow decay after long very-quiet period
+          const veryQuiet = (snrTmp < QuietSnr) && (sfm >= QuietSfm);
+          quietStreakMs = veryQuiet ? Math.min(1e9, quietStreakMs + dt) : 0;
+          quietSnapMs   = veryQuiet ? Math.min(1e9, quietSnapMs + dt)   : 0;
+          if (quietStreakMs >= DecayAfterMs) {
+            const target = Math.min(frameDetDb, baselineDb);
+            state.noiseDetDb = (1-DecayRate)*state.noiseDetDb + DecayRate*target;
+          }
+          // Hard clamps
+          state.noiseDetDb = Math.max(baselineDb - BaselineDownMax, Math.min(state.noiseDetDb, baselineDb));
+          // Optional snap back after very long quiet
+          if (quietSnapMs >= BaselineSnapMs) { state.noiseDetDb = baselineDb; quietSnapMs = 0; }
+        }
+
+        if (!baselineLocked) {
+          // pre-lock: gentle tracking only when quiet
+          const rate = quietFrame ? 0.04 : 0.0;
+          state.noiseDetDb = (1-rate)*state.noiseDetDb + rate*frameDetDb;
+        }
+        ui.pianoNoiseDb.textContent = state.noiseDetDb.toFixed(1);
+
+        // Wide-band noise display
+        const activeWide = (frameWideDb - state.noiseWideDb) >= 6;
+        const rateWide = activeWide ? 0.004 : 0.02;
+        state.noiseWideDb = (1-rateWide)*state.noiseWideDb + rateWide*frameWideDb;
+        ui.noiseDb.textContent = state.noiseWideDb.toFixed(1);
+
+        const snrDet = frameDetDb - state.noiseDetDb;
+        ui.pianoSnr.textContent = snrDet.toFixed(1);
+        drawMeter(Math.max(0, snrDet));
+
+        const nowEpoch = Date.now();
+
+        // Magnitude for onset
+        const mag = new Float32Array(bufFreqDet.length);
+        for (let i=0;i<bufFreqDet.length;i++){ mag[i] = Math.max(0, dbToLin(bufFreqDet[i])); }
+        const flux = prevMag ? (function(){
+          let f=0; for (let i=1;i<mag.length;i++){ const d=mag[i]-prevMag[i]; f += d>0?d:0; } return f/mag.length;
+        })() : 0;
+        prevMag = mag;
+
+        // Single-f0 gate + small tweaks
+        let pianoLike = false, f0=0, midi=0, cents=999, peak=0, HN=0;
+        const startGate = snrDet >= (state.running ? SNR_STOP : SNR_START) && sfm < SFM_MAX;
+        if (startGate) {
+          const est = estimateF0(bufTimeDet, audio.sampleRate);
+          f0 = est.f0; peak = est.peak;
+          if (f0 >= 130 && f0 <= 523) {
+            midi = hzToMidi(f0);
+            const nearest = Math.round(midi);
+            cents = 100*(midi - nearest);
+            HN = harmonicity(bufFreqDet, audio.sampleRate, analyserDet.fftSize, f0);
+            const centsOK = Math.abs(cents) <= CentsWin;
+            const hOK     = HN >= (state.running ? HNminKeep : HNminStart);
+            const peakOK  = peak >= PeakMin;
+            if (centsOK && hOK && (peakOK || flux >= OnsetStart)) {
+              if (state.lastMidi !== null && Math.round(state.lastMidi) === nearest) state.stableCount++;
+              else state.stableCount = 1;
+              state.lastMidi = midi;
+              const need = state.running ? NeedStableFramesKeep : NeedStableFramesStart;
+              if (state.stableCount >= need) pianoLike = true;
+            } else {
+              state.stableCount = 0; state.lastMidi = null;
+            }
+          } else {
+            state.stableCount = 0; state.lastMidi = null;
+          }
+
+          // Chord fallback (very conservative)
+          if (!pianoLike && peak < PeakMin) {
+            const peaks = gridPeaks(bufFreqDet, audio.sampleRate, analyserDet.fftSize);
+            const good = peaks.filter(p => p.HN >= 1.9);
+            if (good.length >= 2) { pianoLike = true; state.stableCount = 1; }
+          }
+        } else {
+          state.stableCount = 0; state.lastMidi = null;
+        }
+
+        // Voice veto (formant & centroid)
+        analyserForm.getFloatFrequencyData(bufFormantDb);
+        const f1 = bandEnergy(bufFormantDb, audio.sampleRate, analyserForm.fftSize, 700, 1200);
+        const f2 = bandEnergy(bufFormantDb, audio.sampleRate, analyserForm.fftSize, 1700, 2600);
+        const tall = bandEnergy(bufFormantDb, audio.sampleRate, analyserForm.fftSize, 500, 3000);
+        const centroid = (function(){ // centroid in 500–3000 Hz
+          const binHz = audio.sampleRate/analyserForm.fftSize;
+          let num=0, den=0;
+          const i0=Math.max(1,Math.floor(500/binHz)), i1=Math.min(bufFormantDb.length-1, Math.ceil(3000/binHz));
+          for (let i=i0;i<=i1;i++){ const mag = dbToLin(bufFormantDb[i]); const hz=i*binHz; num += hz*mag; den += mag; }
+          return den>0 ? num/den : 0;
+        })();
+        const formantScore = (f1 + f2) / (tall + 1e-12);
+        const voicey = (sfm >= 0.20 && sfm <= 0.60) && (formantScore >= 0.35) && (centroid >= 1100);
+
+        const finalLike = pianoLike && !voicey;
+
+        // Diagnostics
+        const names=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+        const note = isFinite(midi) ? `${names[Math.round(midi)%12]}${Math.floor(Math.round(midi)/12 - 1)}` : '—';
+        ui.pitchDiag.textContent = `f0: ${f0?f0.toFixed(1):'—'} Hz (${note}), cents: ${isFinite(cents)?cents.toFixed(1):'—'}, H/N: ${HN?HN.toFixed(2):'—'}, SFM: ${sfm.toFixed(2)}, voice: ${voicey?'YES':'no'}`;
+
+        if (state.auto) {
+          ui.detStatus.textContent = finalLike ? 'piano-like' : (sfm < SFM_MAX ? 'tonal, off-grid' : 'not-tonal');
+          if (finalLike) {
+            state.consecActive++;
+            const need = state.running ? NeedStableFramesKeep : NeedStableFramesStart;
+            if (!state.running && state.consecActive >= need) startTimer(nowEpoch);
+            state.lastHeardTs = nowEpoch;
+          } else {
+            state.consecActive = 0;
+            if (state.running && (nowEpoch - state.lastHeardTs)/1000 >= SILENCE_S) pauseTimer(nowEpoch);
+          }
+        } else {
+          ui.detStatus.textContent = 'auto off';
+        }
+      };
+      loop();
+    } catch(e) {
+      alert('Mic error: ' + (e && e.message ? e.message : e));
+      ui.btnEnable.disabled = false;
+      noSleep.disable();
+    }
+  };
+
+  const disableMic = () => {
+    if (raf) cancelAnimationFrame(raf);
+    if (micStream) { try { micStream.getTracks().forEach(t => t.stop()); } catch(e){} }
+    if (audio && audio.state!=='closed') { try { audio.close(); } catch(e){} }
+    audio=null; micStream=null; analyserWide=null; analyserDet=null; analyserForm=null;
+    bufTimeWide=bufTimeDet=bufFreqDet=bufFormantDb=null;
+    ui.btnEnable.disabled=false; ui.btnDisable.disabled=true;
+    baselineLocked=false; baselineDb=-62; baselineSamples=0; prevMag=null; quietStreakMs=0; quietSnapMs=0;
+    state.stableCount=0; state.lastMidi=null;
+    noSleep.disable();
+  };
+
+  // Buttons
+  ui.btnEnable.addEventListener('click', enableMic, {passive:true});
+  ui.btnDisable.addEventListener('click', disableMic);
+  ui.btnAuto.addEventListener('click', () => {
+    state.auto = !state.auto;
+    ui.btnAuto.textContent = 'Auto: ' + (state.auto ? 'ON' : 'OFF');
+    ui.btnAuto.className = 'btn ' + (state.auto ? 'success' : 'secondary');
+    if (state.auto && state.running) state.lastHeardTs = Date.now();
+  });
+  ui.btnManualStart.addEventListener('click', () => {
+    state.auto = false; ui.btnAuto.textContent='Auto: OFF'; ui.btnAuto.className='btn secondary'; startTimer(Date.now());
+  });
+  ui.btnManualPause.addEventListener('click', () => {
+    state.auto = false; ui.btnAuto.textContent='Auto: OFF'; ui.btnAuto.className='btn secondary'; pauseTimer(Date.now());
+  });
+
+  // Sliders
+  const sync = () => {
+    SNR_START = parseFloat(ui.snrStart.value); ui.snrStartLbl.textContent = SNR_START;
+    SNR_STOP  = parseFloat(ui.snrStop.value);  ui.snrStopLbl.textContent  = SNR_STOP;
+    SILENCE_S = parseFloat(ui.silence.value);  ui.silenceLbl.textContent  = SILENCE_S;
+  };
+  ['snrStart','snrStop','silence'].forEach(id => ui[id].addEventListener('input', sync));
+  sync();
+
+  // iOS: resume audio on any touch
+  const resumeAudio = async () => { try { if (audio && audio.state==='suspended') await audio.resume(); } catch(e){} };
+  window.addEventListener('touchstart', resumeAudio, {passive:true});
+  window.addEventListener('click', resumeAudio, {passive:true});
+
+  document.addEventListener('visibilitychange', () => { if (document.hidden && state.running) pauseTimer(Date.now()); });
+})();</script>
+</body>
+</html>
